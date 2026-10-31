@@ -499,6 +499,22 @@ def merge_recent(groups: list[tuple[list[dict], str]]) -> tuple[list[dict], str]
     return merged, label
 
 
+def count_recent(posts: list, days: int) -> int:
+    cutoff = time.time() - days * 24 * 60 * 60
+    total = 0
+    for post in posts:
+        raw = post.get("time") if isinstance(post, dict) else None
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            when = datetime.fromisoformat(raw).timestamp()
+        except ValueError:
+            continue
+        if when >= cutoff:
+            total += 1
+    return total
+
+
 def fetch_account(handle: str, token: str) -> tuple[list[dict], str]:
     failures: list[str] = []
     groups: list[tuple[list[dict], str]] = []
@@ -522,14 +538,26 @@ def fetch_account(handle: str, token: str) -> tuple[list[dict], str]:
             failures.append(f"公开嵌入时间线：{exc}")
     else:
         failures.append("公开嵌入时间线仍在限流，已跳过")
-    try:
-        embedded = fetch_fxembed(handle)
-        if embedded:
-            groups.append((embedded, "fxembed"))
-    except FetchError as exc:
-        failures.append(f"FxEmbed：{exc}")
+    embedded: list[dict] = []
+    for _attempt in range(3):
+        try:
+            embedded = fetch_fxembed(handle)
+        except FetchError as exc:
+            failures.append(f"FxEmbed：{exc}")
+            embedded = []
+        if count_recent(embedded, 7) >= 2 or len(embedded) >= 8:
+            break
+    if embedded:
+        groups.append((embedded, "fxembed"))
     if groups:
         posts, provider = merge_recent(groups)
+        print(
+            f"fetch @{handle}: "
+            + ", ".join(f"{name} {len(batch)}/{count_recent(batch, 7)} in 7d" for batch, name in groups)
+            + (f" failures={'; '.join(failures)}" if failures else "")
+            + f" kept {len(posts)}/{count_recent(posts, 7)} in 7d via {provider}",
+            flush=True,
+        )
         if posts:
             return posts, provider
     detail = best_failure(failures) if failures else "没有可用的读取方式"
