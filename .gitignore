@@ -1,0 +1,7 @@
+data/accounts.json
+data/briefing.json
+data/translations.json
+data/settings.json
+__pycache__/
+*.pyc
+.vercel/

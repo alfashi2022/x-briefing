@@ -1,0 +1,12 @@
+{
+  "functions": {
+    "api/state.py": {
+      "maxDuration": 10,
+      "includeFiles": "server.py"
+    },
+    "api/refresh.py": {
+      "maxDuration": 60,
+      "includeFiles": "server.py"
+    }
+  }
+}

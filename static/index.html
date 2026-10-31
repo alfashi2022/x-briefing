@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>X 简报</title>
+  <style>
+    :root {
+      --bg: #f3efe6;
+      --ink: #1d1915;
+      --muted: #6d645c;
+      --line: #e3d9cc;
+      --card: #fffdf9;
+      --accent: #8f2d1b;
+      --accent-ink: #fffaf6;
+      --soft: #f7f1e7;
+      --warn-bg: #fff6ea;
+      --warn: #8a4b08;
+      --bad: #9f1239;
+      --shadow: 0 1px 0 rgba(49, 32, 18, 0.04);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Liberation Sans", "DejaVu Sans", "Noto Sans", "WenQuanYi Micro Hei", "Droid Sans Fallback", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.55;
+    }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    .wrap { max-width: 1040px; margin: 0 auto; padding: 32px 20px 64px; }
+    header { margin-bottom: 22px; }
+    .kicker {
+      margin: 0 0 6px;
+      color: var(--accent);
+      font-size: 13px;
+      letter-spacing: 0.08em;
+    }
+    h1 { margin: 0; font-size: 36px; font-weight: 700; letter-spacing: -0.03em; }
+    .lede { margin: 8px 0 0; max-width: 42rem; color: var(--muted); }
+    .panel, .card, .empty, .settings, .notice {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+    }
+    .panel { padding: 16px; }
+    form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    input[type="text"], input[type="password"] {
+      flex: 1 1 220px;
+      min-width: 0;
+      border: 1px solid #d9cec0;
+      background: #fff;
+      color: var(--ink);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    input:focus, button:focus-visible { outline: 2px solid #c46a3a; outline-offset: 2px; }
+    button {
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 10px 14px;
+      background: var(--soft);
+      color: var(--ink);
+    }
+    button.primary { background: var(--accent); color: var(--accent-ink); }
+    button:disabled { opacity: 0.55; cursor: progress; }
+    .form-error { min-height: 1.2em; margin: 8px 0 0; color: var(--bad); }
+    .accounts { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; padding: 0; list-style: none; }
+    .accounts li {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 999px;
+      padding: 4px 4px 4px 12px;
+    }
+    .accounts button { padding: 6px 10px; border-radius: 999px; background: transparent; color: var(--accent); }
+    .meta { margin: 12px 0 0; color: var(--muted); font-size: 14px; }
+    .notice { margin-top: 14px; padding: 12px 14px; background: var(--warn-bg); color: var(--warn); }
+    .notice ul { margin: 0; padding-left: 1.2em; }
+    .posts { display: flex; flex-direction: column; gap: 14px; margin-top: 14px; }
+    .card { overflow: hidden; }
+    .card-head, .card-foot {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: baseline;
+      padding: 12px 16px;
+    }
+    .who { font-weight: 700; }
+    .when, .card-foot, .col-label, .engine { color: var(--muted); font-size: 13px; }
+    .columns { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .col { padding: 12px 16px 16px; min-width: 0; }
+    .col + .col { border-left: 1px solid var(--line); background: #fbf8f2; }
+    .col-label { margin: 0 0 6px; }
+    .col-text { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 16px; }
+    .failed { color: var(--bad); }
+    .card-foot a { color: var(--accent); }
+    .empty { margin-top: 14px; padding: 28px 20px; text-align: center; }
+    .empty h2 { margin: 0 0 6px; font-size: 22px; }
+    .empty p { margin: 0; color: var(--muted); }
+    .settings { margin-top: 18px; padding: 12px 16px 16px; }
+    .settings summary { cursor: pointer; font-weight: 700; }
+    .settings p { color: var(--muted); font-size: 14px; }
+    .settings form { margin-top: 8px; }
+    footer { margin-top: 18px; color: var(--muted); font-size: 13px; }
+    footer p { margin: 0 0 8px; }
+    @media (max-width: 720px) {
+      h1 { font-size: 30px; }
+      .columns { grid-template-columns: 1fr; }
+      .col + .col { border-left: 0; border-top: 1px solid var(--line); }
+      .card-head, .card-foot { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <p class="kicker">手动刷新</p>
+      <h1>X 简报</h1>
+      <p class="lede">添加要跟踪的账号。点击「刷新」后，每条发言并排显示原文和简体中文。</p>
+    </header>
+
+    <section class="panel">
+      <form id="add-form">
+        <label for="handle">账号</label>
+        <input id="handle" name="handle" type="text" maxlength="16" placeholder="输入账号，例如 nasa，可带 @" autocomplete="off" spellcheck="false" />
+        <button type="submit">添加账号</button>
+        <button type="button" id="refresh" class="primary">刷新</button>
+      </form>
+      <p id="form-error" class="form-error" role="alert"></p>
+      <ul id="accounts" class="accounts"></ul>
+      <p id="meta" class="meta"></p>
+    </section>
+
+    <section id="notice" class="notice" hidden></section>
+    <section id="posts" class="posts" aria-live="polite"></section>
+    <section id="empty" class="empty" hidden>
+      <h2 id="empty-title">还没有账号</h2>
+      <p id="empty-copy">请添加一个 X 账号（可带或不带 @）。</p>
+    </section>
+
+    <details class="settings">
+      <summary>可选设置</summary>
+      <p>默认不用密钥。公开嵌入时间线约每段时间 30 次请求；这台机器上它经常被限流，刷新会改用 FxEmbed 的公开只读接口。</p>
+      <p id="token-hint">如果要改走 X 官方 API v2，在 <a href="https://developer.x.com/" target="_blank" rel="noopener noreferrer">developer.x.com</a> 创建应用，复制 Bearer Token 后保存。免费套餐可能没有读取时间线的权限。Token 只写在本机文件里，页面不会再显示它。</p>
+      <form id="settings-form">
+        <label for="token">Bearer Token</label>
+        <input id="token" type="password" placeholder="可选：Bearer Token" autocomplete="off" />
+        <button type="submit">保存</button>
+        <button type="button" id="clear-token">清除</button>
+      </form>
+      <p id="token-state"></p>
+    </details>
+
+    <footer>
+      <p id="storage-note">账号保存在本机 data/accounts.json，刷新页面后仍然在。点击「刷新」才会重新获取发言。</p>
+      <p>翻译为简体中文，来自 Google 的免费翻译接口；失败时改用 MyMemory。翻译失败会写明原因，页面不会编造译文。</p>
+    </footer>
+  </div>
+  <noscript>需要启用 JavaScript 才能使用这个页面。</noscript>
+  <script>
+    const formError = document.querySelector("#form-error");
+    const accountsEl = document.querySelector("#accounts");
+    const metaEl = document.querySelector("#meta");
+    const noticeEl = document.querySelector("#notice");
+    const postsEl = document.querySelector("#posts");
+    const emptyEl = document.querySelector("#empty");
+    const emptyTitle = document.querySelector("#empty-title");
+    const emptyCopy = document.querySelector("#empty-copy");
+    const refreshBtn = document.querySelector("#refresh");
+    const tokenState = document.querySelector("#token-state");
+    const handleInput = document.querySelector("#handle");
+    const STORE_KEY = "x-briefing-v1";
+    let busy = false;
+    let browserMode = false;
+    let latest = { accounts: [] };
+
+    function normalizeHandle(raw) {
+      const handle = String(raw || "").trim().replace(/^@+/, "").trim();
+      if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) {
+        throw new Error("请输入有效账号：1 到 15 位字母、数字或下划线，可带 @");
+      }
+      return handle;
+    }
+
+    function emptyStore() {
+      return { accounts: [], posts: [], errors: [], sources: [], refreshedAt: null, bearerToken: "" };
+    }
+
+    function readStore() {
+      try {
+        const data = JSON.parse(localStorage.getItem(STORE_KEY) || "{}");
+        const store = emptyStore();
+        if (Array.isArray(data.accounts)) store.accounts = data.accounts;
+        if (Array.isArray(data.posts)) store.posts = data.posts;
+        if (Array.isArray(data.errors)) store.errors = data.errors;
+        if (Array.isArray(data.sources)) store.sources = data.sources;
+        if (typeof data.refreshedAt === "string") store.refreshedAt = data.refreshedAt;
+        if (typeof data.bearerToken === "string") store.bearerToken = data.bearerToken;
+        return store;
+      } catch {
+        return emptyStore();
+      }
+    }
+
+    function writeStore(store) {
+      localStorage.setItem(STORE_KEY, JSON.stringify(store));
+    }
+
+    function localState(remote) {
+      const stored = readStore();
+      if (remote && remote.persist === "browser") {
+        const note = document.querySelector("#storage-note");
+        const hint = document.querySelector("#token-hint");
+        if (note) note.textContent = "账号保存在这个浏览器里，只在这台设备上有效。点击「刷新」才会重新获取发言。";
+        if (hint) hint.textContent = "可选的 Bearer Token 也只保存在这个浏览器里，不会写到服务器。页面不会再显示它。";
+      }
+      return {
+        accounts: stored.accounts,
+        posts: stored.posts,
+        errors: stored.errors,
+        sources: stored.sources,
+        refreshedAt: stored.refreshedAt,
+        bearerConfigured: Boolean(stored.bearerToken),
+        refreshing: false,
+        providerLabels: (remote && remote.providerLabels) || latest.providerLabels || {},
+        persist: "browser",
+      };
+    }
+
+    function setError(message) {
+      formError.textContent = message || "";
+    }
+
+    async function api(path, options) {
+      const response = await fetch(path, options);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "请求失败");
+      return data;
+    }
+
+    function formatTime(iso) {
+      if (!iso) return "时间未知";
+      const date = new Date(iso);
+      if (Number.isNaN(date.getTime())) return "时间未知";
+      return new Intl.DateTimeFormat("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }).format(date);
+    }
+
+    function safePostUrl(url) {
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== "https:") return "";
+        if (!["x.com", "twitter.com", "mobile.twitter.com"].includes(parsed.hostname)) return "";
+        return "https://x.com" + parsed.pathname + parsed.search;
+      } catch {
+        return "";
+      }
+    }
+
+    function render(state) {
+      accountsEl.replaceChildren();
+      for (const account of state.accounts || []) {
+        const item = document.createElement("li");
+        const name = document.createElement("span");
+        name.textContent = "@" + account.handle;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "删除";
+        button.disabled = busy;
+        button.addEventListener("click", () => removeAccount(account.handle));
+        item.append(name, button);
+        accountsEl.append(item);
+      }
+
+      const bits = [];
+      if (state.refreshedAt) bits.push("上次刷新 " + formatTime(state.refreshedAt));
+      if ((state.posts || []).length) bits.push("共 " + state.posts.length + " 条");
+      const providers = [...new Set((state.sources || []).map((item) => {
+        return (state.providerLabels || {})[item.provider] || item.provider;
+      }))];
+      if (providers.length) bits.push("来源：" + providers.join("、"));
+      metaEl.textContent = bits.join(" · ");
+
+      noticeEl.replaceChildren();
+      if ((state.errors || []).length) {
+        const list = document.createElement("ul");
+        for (const error of state.errors) {
+          const item = document.createElement("li");
+          item.textContent = "@" + error.handle + "：" + error.message;
+          list.append(item);
+        }
+        noticeEl.append(list);
+        noticeEl.hidden = false;
+      } else {
+        noticeEl.hidden = true;
+      }
+
+      postsEl.replaceChildren();
+      for (const post of state.posts || []) {
+        postsEl.append(renderPost(post));
+      }
+
+      const hasAccounts = (state.accounts || []).length > 0;
+      const hasPosts = (state.posts || []).length > 0;
+      emptyEl.hidden = hasPosts;
+      if (!hasAccounts) {
+        emptyTitle.textContent = "还没有账号";
+        emptyCopy.textContent = "请添加一个 X 账号（可带或不带 @）。";
+      } else if (!hasPosts) {
+        emptyTitle.textContent = "还没有发言";
+        emptyCopy.textContent = "已添加 " + state.accounts.length + " 个账号。点击「刷新」获取发言。";
+      }
+      tokenState.textContent = state.bearerConfigured ? "Bearer Token：已保存在本机" : "Bearer Token：未设置";
+      latest = state;
+      applyActions();
+    }
+
+    function renderPost(post) {
+      const card = document.createElement("article");
+      card.className = "card";
+      const head = document.createElement("div");
+      head.className = "card-head";
+      const who = document.createElement("div");
+      who.className = "who";
+      let label = "@" + post.handle;
+      const sameAuthor = post.authorHandle && post.authorHandle.toLowerCase() === String(post.handle).toLowerCase();
+      if (sameAuthor && post.authorName && post.authorName.toLowerCase() !== String(post.handle).toLowerCase()) {
+        label += " · " + post.authorName;
+      }
+      if (post.reposted && post.authorHandle) label += " 转发自 @" + post.authorHandle;
+      if (post.replyTo) label += " 回复 @" + post.replyTo;
+      who.textContent = label;
+      const when = document.createElement("div");
+      when.className = "when";
+      when.textContent = formatTime(post.time);
+      head.append(who, when);
+
+      const columns = document.createElement("div");
+      columns.className = "columns";
+      columns.append(column("原文", post.text || "", false), column("中文", chineseText(post), !post.translation));
+
+      const foot = document.createElement("div");
+      foot.className = "card-foot";
+      const engine = document.createElement("span");
+      engine.className = "engine";
+      engine.textContent = engineLabel(post);
+      const link = document.createElement("a");
+      const href = safePostUrl(post.url);
+      if (href) {
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = "在 X 上查看";
+      }
+      foot.append(engine, link);
+      card.append(head, columns, foot);
+      return card;
+    }
+
+    function column(label, text, failed) {
+      const col = document.createElement("div");
+      col.className = "col";
+      const title = document.createElement("p");
+      title.className = "col-label";
+      title.textContent = label;
+      const body = document.createElement("p");
+      body.className = "col-text" + (failed ? " failed" : "");
+      body.textContent = text;
+      col.append(title, body);
+      return col;
+    }
+
+    function chineseText(post) {
+      if (post.translation) return post.translation;
+      return post.translationError || "没有译文";
+    }
+
+    function engineLabel(post) {
+      if (!post.translation) return "翻译失败";
+      if (post.sourceLang && String(post.sourceLang).startsWith("zh") && post.translation === post.text) {
+        return "原文为中文";
+      }
+      if (post.engine === "mymemory") return "机器翻译 · MyMemory";
+      if (post.engine === "google" || post.engine === "cache") return "机器翻译";
+      return "机器翻译";
+    }
+
+    function applyActions() {
+      const hasAccounts = (latest.accounts || []).length > 0;
+      const addBtn = document.querySelector("#add-form button[type=submit]");
+      addBtn.disabled = busy;
+      addBtn.classList.toggle("primary", !hasAccounts);
+      refreshBtn.disabled = busy || !hasAccounts;
+      refreshBtn.classList.toggle("primary", hasAccounts);
+      refreshBtn.textContent = busy ? "刷新中…" : "刷新";
+      document.querySelectorAll("#accounts button, #settings-form button").forEach((button) => {
+        button.disabled = busy;
+      });
+    }
+
+    function setBusy(next) {
+      busy = next;
+      applyActions();
+    }
+
+    async function load() {
+      try {
+        const remote = await api("/api/state");
+        browserMode = remote.persist === "browser";
+        render(browserMode ? localState(remote) : remote);
+      } catch (error) {
+        setError(error.message || "打不开本地数据");
+      }
+    }
+
+    async function removeAccount(handle) {
+      if (busy) return;
+      if (!confirm("删除 @" + handle + "？")) return;
+      setError("");
+      try {
+        if (browserMode) {
+          const stored = readStore();
+          const key = handle.toLowerCase();
+          const before = stored.accounts.length;
+          stored.accounts = stored.accounts.filter((item) => String(item.handle).toLowerCase() !== key);
+          if (stored.accounts.length === before) throw new Error("列表里没有这个账号");
+          stored.posts = stored.posts.filter((item) => String(item.handle).toLowerCase() !== key);
+          stored.errors = stored.errors.filter((item) => String(item.handle).toLowerCase() !== key);
+          stored.sources = stored.sources.filter((item) => String(item.handle).toLowerCase() !== key);
+          if (!stored.accounts.length) {
+            stored.posts = [];
+            stored.errors = [];
+            stored.sources = [];
+            stored.refreshedAt = null;
+          }
+          writeStore(stored);
+          render(localState());
+          return;
+        }
+        render(await api("/api/accounts/" + encodeURIComponent(handle), { method: "DELETE" }));
+      } catch (error) {
+        setError(error.message);
+      }
+    }
+
+    document.querySelector("#add-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (busy) return;
+      setError("");
+      try {
+        if (browserMode) {
+          const handle = normalizeHandle(handleInput.value);
+          const stored = readStore();
+          if (stored.accounts.some((item) => String(item.handle).toLowerCase() === handle.toLowerCase())) {
+            throw new Error("这个账号已经在列表里");
+          }
+          if (stored.accounts.length >= 20) throw new Error("最多添加 20 个账号");
+          stored.accounts.push({ handle, addedAt: new Date().toISOString() });
+          writeStore(stored);
+          render(localState());
+        } else {
+          render(await api("/api/accounts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ handle: handleInput.value }),
+          }));
+        }
+        handleInput.value = "";
+        handleInput.focus();
+      } catch (error) {
+        setError(error.message);
+      }
+    });
+
+    refreshBtn.addEventListener("click", async () => {
+      if (busy) return;
+      setError("");
+      setBusy(true);
+      metaEl.textContent = "正在获取发言并翻译，请稍候。";
+      try {
+        if (browserMode) {
+          const stored = readStore();
+          const remote = await api("/api/refresh", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ accounts: stored.accounts, bearerToken: stored.bearerToken || "" }),
+          });
+          const refreshed = new Set((remote.sources || []).map((item) => String(item.handle).toLowerCase()));
+          stored.posts = (stored.posts || []).filter((item) => !refreshed.has(String(item.handle).toLowerCase()));
+          stored.posts = stored.posts.concat(remote.posts || []);
+          stored.posts.sort((a, b) => String(b.time || "").localeCompare(String(a.time || "")));
+          stored.errors = remote.errors || [];
+          stored.sources = remote.sources || [];
+          stored.refreshedAt = remote.refreshedAt || null;
+          writeStore(stored);
+          render(localState(remote));
+        } else {
+          render(await api("/api/refresh", { method: "POST" }));
+        }
+      } catch (error) {
+        setError(error.message);
+        await load();
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    document.querySelector("#settings-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (busy) return;
+      setError("");
+      try {
+        await saveToken(document.querySelector("#token").value);
+        document.querySelector("#token").value = "";
+      } catch (error) {
+        setError(error.message);
+      }
+    });
+
+    document.querySelector("#clear-token").addEventListener("click", async () => {
+      if (busy) return;
+      setError("");
+      try {
+        await saveToken("");
+        document.querySelector("#token").value = "";
+      } catch (error) {
+        setError(error.message);
+      }
+    });
+
+    async function saveToken(value) {
+      if (browserMode) {
+        const stored = readStore();
+        let token = String(value || "").trim();
+        if (token.toLowerCase().startsWith("bearer ")) token = token.slice(7).trim();
+        stored.bearerToken = token;
+        writeStore(stored);
+        render(localState());
+        return;
+      }
+      render(await api("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bearerToken: value }),
+      }));
+    }
+
+    load();
+  </script>
+</body>
+</html>
