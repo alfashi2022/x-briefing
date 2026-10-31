@@ -29,7 +29,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 8787
-POSTS_PER_ACCOUNT = 8
+POSTS_PER_ACCOUNT = 30
 MAX_ACCOUNTS = 20
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -306,19 +306,14 @@ def fetch_syndication(handle: str) -> list[dict]:
                 "provider": "syndication",
             }
         )
-        if len(posts) >= POSTS_PER_ACCOUNT:
+        if len(posts) >= 100:
             break
     if remaining == "0":
         note_syndication_limit(reset_at)
     return posts
 
 
-def fetch_fxembed(handle: str) -> list[dict]:
-    url = (
-        "https://api.fxtwitter.com/2/profile/"
-        f"{urllib.parse.quote(handle)}/statuses?count={POSTS_PER_ACCOUNT}"
-    )
-    status, _headers, body = http_request(url, headers={"User-Agent": UA, "Accept": "application/json"})
+def fxembed_page(handle: str, status: int, body: bytes) -> tuple[list[dict], str]:
     try:
         data = json.loads(body.decode("utf-8", "replace") or "{}")
     except json.JSONDecodeError as exc:
@@ -364,6 +359,37 @@ def fetch_fxembed(handle: str) -> list[dict]:
                 "provider": "fxembed",
             }
         )
+    cursor = data.get("cursor") if isinstance(data.get("cursor"), dict) else {}
+    nxt = cursor.get("bottom") if isinstance(cursor.get("bottom"), str) else ""
+    return posts, nxt
+
+
+def fetch_fxembed(handle: str) -> list[dict]:
+    posts: list[dict] = []
+    cursor = ""
+    seen_cursors: set[str] = set()
+    for _page in range(2):
+        if len(posts) >= POSTS_PER_ACCOUNT:
+            break
+        query = {"count": str(max(POSTS_PER_ACCOUNT, 20))}
+        if cursor:
+            query["cursor"] = cursor
+        url = (
+            "https://api.fxtwitter.com/2/profile/"
+            f"{urllib.parse.quote(handle)}/statuses?{urllib.parse.urlencode(query)}"
+        )
+        try:
+            status, _headers, body = http_request(url, headers={"User-Agent": UA, "Accept": "application/json"})
+            page_posts, nxt = fxembed_page(handle, status, body)
+        except FetchError:
+            if posts:
+                break
+            raise
+        posts.extend(page_posts)
+        if not nxt or nxt in seen_cursors or not page_posts:
+            break
+        seen_cursors.add(nxt)
+        cursor = nxt
     posts.sort(key=lambda post: post.get("time") or "", reverse=True)
     return posts[:POSTS_PER_ACCOUNT]
 
@@ -405,7 +431,7 @@ def fetch_official(handle: str, token: str) -> list[dict]:
         raise FetchError("官方 API 没有返回用户 id")
     tw_status, _tw_headers, tw_body = http_request(
         "https://api.x.com/2/users/"
-        f"{urllib.parse.quote(user_id)}/tweets?max_results=10&tweet.fields=created_at,lang,text",
+        f"{urllib.parse.quote(user_id)}/tweets?max_results={POSTS_PER_ACCOUNT}&tweet.fields=created_at,lang,text",
         headers=headers,
     )
     try:
@@ -449,19 +475,47 @@ def best_failure(failures: list[str]) -> str:
     return "；".join(failures)
 
 
+def merge_recent(groups: list[tuple[list[dict], str]]) -> tuple[list[dict], str]:
+    chosen: dict[str, dict] = {}
+    for posts, provider in groups:
+        for post in posts:
+            if not isinstance(post, dict):
+                continue
+            key = str(post.get("id") or post.get("url") or "")
+            if not key:
+                key = hashlib.sha256(str(post.get("text") or "").encode()).hexdigest()[:16]
+            current = chosen.get(key)
+            if current is None or (str(post.get("time") or "") > str(current.get("time") or "")):
+                item = dict(post)
+                item["provider"] = provider
+                chosen[key] = item
+    merged = sorted(chosen.values(), key=lambda post: str(post.get("time") or ""), reverse=True)
+    merged = merged[:POSTS_PER_ACCOUNT]
+    counts: dict[str, int] = {}
+    for post in merged:
+        name = str(post.get("provider") or "")
+        counts[name] = counts.get(name, 0) + 1
+    label = max(counts, key=lambda name: counts[name]) if counts else ""
+    return merged, label
+
+
 def fetch_account(handle: str, token: str) -> tuple[list[dict], str]:
     failures: list[str] = []
+    groups: list[tuple[list[dict], str]] = []
     if token:
         try:
-            return fetch_official(handle, token), "x-api"
+            official = fetch_official(handle, token)
+            if official:
+                groups.append((official, "x-api"))
         except FetchError as exc:
             failures.append(f"官方 API：{exc}")
     if syndication_ready():
         try:
             syndicated = fetch_syndication(handle)
             if syndicated:
-                return syndicated, "syndication"
-            failures.append("公开嵌入时间线没有帖子")
+                groups.append((syndicated, "syndication"))
+            else:
+                failures.append("公开嵌入时间线没有帖子")
         except RateLimitError as exc:
             failures.append(str(exc))
         except FetchError as exc:
@@ -469,9 +523,15 @@ def fetch_account(handle: str, token: str) -> tuple[list[dict], str]:
     else:
         failures.append("公开嵌入时间线仍在限流，已跳过")
     try:
-        return fetch_fxembed(handle), "fxembed"
+        embedded = fetch_fxembed(handle)
+        if embedded:
+            groups.append((embedded, "fxembed"))
     except FetchError as exc:
         failures.append(f"FxEmbed：{exc}")
+    if groups:
+        posts, provider = merge_recent(groups)
+        if posts:
+            return posts, provider
     detail = best_failure(failures) if failures else "没有可用的读取方式"
     raise FetchError(detail)
 
@@ -1284,6 +1344,20 @@ def self_check() -> None:
     assert not password_matches("password2", sample)
     assert "passwordHash" not in user_state(sample)
     assert logged_out_state()["authenticated"] is False
+    highlights = [
+        {"id": f"old{i}", "time": "2022-04-28T01:57:27+00:00", "text": "old", "handle": "elonmusk"}
+        for i in range(8)
+    ]
+    highlights[0]["time"] = "2026-10-30T05:28:57+00:00"
+    recent = [
+        {"id": f"new{i}", "time": f"2026-10-31T{i % 24:02d}:{i:02d}:00+00:00", "text": "new", "handle": "elonmusk"}
+        for i in range(30)
+    ]
+    merged, provider = merge_recent([(highlights, "syndication"), (recent, "fxembed")])
+    assert len(merged) == POSTS_PER_ACCOUNT
+    assert all(str(post["id"]).startswith("new") for post in merged)
+    assert provider == "fxembed"
+    assert merged[0]["time"] >= merged[-1]["time"]
     if not os.environ.get("BLOB_READ_WRITE_TOKEN"):
         email = "self-check@example.com"
         user = new_user(email, "password1")
