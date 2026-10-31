@@ -80,6 +80,57 @@
     }
     .accounts button { padding: 6px 10px; border-radius: 999px; background: transparent; color: var(--accent); }
     .meta { margin: 12px 0 0; color: var(--muted); font-size: 14px; }
+    .filters { display: flex; flex-wrap: wrap; gap: 12px 18px; margin-top: 14px; }
+    .filters label {
+      position: static;
+      width: auto;
+      height: auto;
+      overflow: visible;
+      clip: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .filters select {
+      font: inherit;
+      color: var(--ink);
+      background: #fff;
+      border: 1px solid #d9cec0;
+      border-radius: 10px;
+      padding: 8px 10px;
+    }
+    .session-bar {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .auth label {
+      position: static;
+      width: auto;
+      height: auto;
+      overflow: visible;
+      clip: auto;
+      display: block;
+      margin: 0 0 6px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .auth-field { flex: 1 1 240px; min-width: 200px; }
+    .auth p.hint { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
+    input[type="email"] {
+      width: 100%;
+      border: 1px solid #d9cec0;
+      background: #fff;
+      color: var(--ink);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
     .notice { margin-top: 14px; padding: 12px 14px; background: var(--warn-bg); color: var(--warn); }
     .notice ul { margin: 0; padding-left: 1.2em; }
     .posts { display: flex; flex-direction: column; gap: 14px; margin-top: 14px; }
@@ -122,9 +173,32 @@
     <header>
       <p class="kicker">手动刷新</p>
       <h1>X 简报</h1>
-      <p class="lede">添加要跟踪的账号。点击「刷新」后，每条发言并排显示原文和简体中文。</p>
+      <p class="lede">登录后添加要跟踪的账号。点击「刷新」后，每条发言并排显示原文和简体中文。</p>
     </header>
 
+    <div id="session-bar" class="session-bar" hidden>
+      <span id="session-email"></span>
+      <button type="button" id="logout">退出</button>
+    </div>
+
+    <section id="auth" class="panel auth" hidden>
+      <form id="auth-form">
+        <div class="auth-field">
+          <label for="email">邮箱</label>
+          <input id="email" name="email" type="email" autocomplete="username" maxlength="254" placeholder="you@example.com" />
+        </div>
+        <div class="auth-field">
+          <label for="password">密码</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" placeholder="至少 8 位" />
+        </div>
+        <button type="submit" id="login-btn" class="primary">登录</button>
+        <button type="button" id="register-btn">注册</button>
+      </form>
+      <p id="auth-error" class="form-error" role="alert"></p>
+      <p class="hint">注册或登录后，关注的账号和上次简报只属于这个账号。退出后再打开，不会看到别人的列表。</p>
+    </section>
+
+    <div id="app" hidden>
     <section class="panel">
       <form id="add-form">
         <label for="handle">账号</label>
@@ -135,6 +209,22 @@
       <p id="form-error" class="form-error" role="alert"></p>
       <ul id="accounts" class="accounts"></ul>
       <p id="meta" class="meta"></p>
+      <div id="filters" class="filters" hidden>
+        <label>账号
+          <select id="account-filter">
+            <option value="">全部账号</option>
+          </select>
+        </label>
+        <label>时间
+          <select id="time-filter">
+            <option value="7">近 7 天</option>
+            <option value="30" selected>近 30 天</option>
+            <option value="90">近 90 天</option>
+            <option value="180">近 180 天</option>
+            <option value="360">近 360 天</option>
+          </select>
+        </label>
+      </div>
     </section>
 
     <section id="notice" class="notice" hidden></section>
@@ -147,7 +237,7 @@
     <details class="settings">
       <summary>可选设置</summary>
       <p>默认不用密钥。公开嵌入时间线约每段时间 30 次请求；这台机器上它经常被限流，刷新会改用 FxEmbed 的公开只读接口。</p>
-      <p id="token-hint">如果要改走 X 官方 API v2，在 <a href="https://developer.x.com/" target="_blank" rel="noopener noreferrer">developer.x.com</a> 创建应用，复制 Bearer Token 后保存。免费套餐可能没有读取时间线的权限。Token 只写在本机文件里，页面不会再显示它。</p>
+      <p id="token-hint">如果要改走 X 官方 API v2，在 <a href="https://developer.x.com/" target="_blank" rel="noopener noreferrer">developer.x.com</a> 创建应用，复制 Bearer Token 后保存。免费套餐可能没有读取时间线的权限。Token 保存在你的账号里，页面不会再显示它。</p>
       <form id="settings-form">
         <label for="token">Bearer Token</label>
         <input id="token" type="password" placeholder="可选：Bearer Token" autocomplete="off" />
@@ -158,9 +248,10 @@
     </details>
 
     <footer>
-      <p id="storage-note">账号保存在本机 data/accounts.json，刷新页面后仍然在。点击「刷新」才会重新获取发言。</p>
+      <p id="storage-note">关注的账号和上次简报保存在你的账号里。换一个账号登录会看到另一份列表。点击「刷新」才会重新获取发言。</p>
       <p>翻译为简体中文，来自 Google 的免费翻译接口；失败时改用 MyMemory。翻译失败会写明原因，页面不会编造译文。</p>
     </footer>
+    </div>
   </div>
   <noscript>需要启用 JavaScript 才能使用这个页面。</noscript>
   <script>
@@ -175,63 +266,21 @@
     const refreshBtn = document.querySelector("#refresh");
     const tokenState = document.querySelector("#token-state");
     const handleInput = document.querySelector("#handle");
-    const STORE_KEY = "x-briefing-v1";
+    const filtersEl = document.querySelector("#filters");
+    const accountFilterEl = document.querySelector("#account-filter");
+    const timeFilterEl = document.querySelector("#time-filter");
+    const TIME_WINDOWS = [7, 30, 90, 180, 360];
+    const authEl = document.querySelector("#auth");
+    const appEl = document.querySelector("#app");
+    const sessionBar = document.querySelector("#session-bar");
+    const sessionEmail = document.querySelector("#session-email");
+    const authError = document.querySelector("#auth-error");
+    let accountFilter = "";
+    let timeFilterDays = 30;
     let busy = false;
-    let browserMode = false;
     let latest = { accounts: [] };
 
-    function normalizeHandle(raw) {
-      const handle = String(raw || "").trim().replace(/^@+/, "").trim();
-      if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) {
-        throw new Error("请输入有效账号：1 到 15 位字母、数字或下划线，可带 @");
-      }
-      return handle;
-    }
-
-    function emptyStore() {
-      return { accounts: [], posts: [], errors: [], sources: [], refreshedAt: null, bearerToken: "" };
-    }
-
-    function readStore() {
-      try {
-        const data = JSON.parse(localStorage.getItem(STORE_KEY) || "{}");
-        const store = emptyStore();
-        if (Array.isArray(data.accounts)) store.accounts = data.accounts;
-        if (Array.isArray(data.posts)) store.posts = data.posts;
-        if (Array.isArray(data.errors)) store.errors = data.errors;
-        if (Array.isArray(data.sources)) store.sources = data.sources;
-        if (typeof data.refreshedAt === "string") store.refreshedAt = data.refreshedAt;
-        if (typeof data.bearerToken === "string") store.bearerToken = data.bearerToken;
-        return store;
-      } catch {
-        return emptyStore();
-      }
-    }
-
-    function writeStore(store) {
-      localStorage.setItem(STORE_KEY, JSON.stringify(store));
-    }
-
-    function localState(remote) {
-      const stored = readStore();
-      if (remote && remote.persist === "browser") {
-        const note = document.querySelector("#storage-note");
-        const hint = document.querySelector("#token-hint");
-        if (note) note.textContent = "账号保存在这个浏览器里，只在这台设备上有效。点击「刷新」才会重新获取发言。";
-        if (hint) hint.textContent = "可选的 Bearer Token 也只保存在这个浏览器里，不会写到服务器。页面不会再显示它。";
-      }
-      return {
-        accounts: stored.accounts,
-        posts: stored.posts,
-        errors: stored.errors,
-        sources: stored.sources,
-        refreshedAt: stored.refreshedAt,
-        bearerConfigured: Boolean(stored.bearerToken),
-        refreshing: false,
-        providerLabels: (remote && remote.providerLabels) || latest.providerLabels || {},
-        persist: "browser",
-      };
-    }
+    try { localStorage.removeItem("x-briefing-v1"); } catch { /* old shared list is unused */ }
 
     function setError(message) {
       formError.textContent = message || "";
@@ -269,6 +318,42 @@
       }
     }
 
+    function postTime(post) {
+      const time = new Date(post.time || "").getTime();
+      return Number.isNaN(time) ? null : time;
+    }
+
+    function filteredPosts(state) {
+      const cutoff = Date.now() - timeFilterDays * 24 * 60 * 60 * 1000;
+      return (state.posts || []).filter((post) => {
+        if (accountFilter && String(post.handle).toLowerCase() !== accountFilter.toLowerCase()) return false;
+        const time = postTime(post);
+        return time != null && time >= cutoff;
+      });
+    }
+
+    function syncFilters(state) {
+      const handles = (state.accounts || []).map((account) => account.handle);
+      if (accountFilter && !handles.some((handle) => handle.toLowerCase() === accountFilter.toLowerCase())) {
+        accountFilter = "";
+      }
+      if (!TIME_WINDOWS.includes(timeFilterDays)) timeFilterDays = 30;
+      accountFilterEl.replaceChildren();
+      const all = document.createElement("option");
+      all.value = "";
+      all.textContent = "全部账号";
+      accountFilterEl.append(all);
+      for (const handle of handles) {
+        const option = document.createElement("option");
+        option.value = handle;
+        option.textContent = "@" + handle;
+        accountFilterEl.append(option);
+      }
+      accountFilterEl.value = accountFilter;
+      timeFilterEl.value = String(timeFilterDays);
+      filtersEl.hidden = handles.length === 0;
+    }
+
     function render(state) {
       accountsEl.replaceChildren();
       for (const account of state.accounts || []) {
@@ -284,9 +369,14 @@
         accountsEl.append(item);
       }
 
+      syncFilters(state);
+      const visible = filteredPosts(state);
       const bits = [];
       if (state.refreshedAt) bits.push("上次刷新 " + formatTime(state.refreshedAt));
-      if ((state.posts || []).length) bits.push("共 " + state.posts.length + " 条");
+      if ((state.posts || []).length) {
+        bits.push("显示 " + visible.length + " 条");
+        bits.push("共 " + state.posts.length + " 条");
+      }
       const providers = [...new Set((state.sources || []).map((item) => {
         return (state.providerLabels || {})[item.provider] || item.provider;
       }))];
@@ -308,21 +398,24 @@
       }
 
       postsEl.replaceChildren();
-      for (const post of state.posts || []) {
+      for (const post of visible) {
         postsEl.append(renderPost(post));
       }
 
       const hasAccounts = (state.accounts || []).length > 0;
       const hasPosts = (state.posts || []).length > 0;
-      emptyEl.hidden = hasPosts;
+      emptyEl.hidden = visible.length > 0;
       if (!hasAccounts) {
         emptyTitle.textContent = "还没有账号";
         emptyCopy.textContent = "请添加一个 X 账号（可带或不带 @）。";
       } else if (!hasPosts) {
         emptyTitle.textContent = "还没有发言";
         emptyCopy.textContent = "已添加 " + state.accounts.length + " 个账号。点击「刷新」获取发言。";
+      } else if (!visible.length) {
+        emptyTitle.textContent = "没有符合条件的发言";
+        emptyCopy.textContent = "账号和时间筛选只隐藏已加载的发言，不会删除账号。";
       }
-      tokenState.textContent = state.bearerConfigured ? "Bearer Token：已保存在本机" : "Bearer Token：未设置";
+      tokenState.textContent = state.bearerConfigured ? "Bearer Token：已保存在你的账号里" : "Bearer Token：未设置";
       latest = state;
       applyActions();
     }
@@ -415,13 +508,39 @@
       applyActions();
     }
 
+    function showAuth() {
+      authEl.hidden = false;
+      appEl.hidden = true;
+      sessionBar.hidden = true;
+      sessionEmail.textContent = "";
+      latest = { accounts: [] };
+    }
+
+    function showApp(state) {
+      authEl.hidden = true;
+      appEl.hidden = false;
+      sessionBar.hidden = false;
+      sessionEmail.textContent = state.email || "";
+      authError.textContent = "";
+      render(state);
+    }
+
+    function resetFilters() {
+      accountFilter = "";
+      timeFilterDays = 30;
+    }
+
     async function load() {
       try {
         const remote = await api("/api/state");
-        browserMode = remote.persist === "browser";
-        render(browserMode ? localState(remote) : remote);
+        if (!remote.authenticated) {
+          showAuth();
+          return;
+        }
+        showApp(remote);
       } catch (error) {
-        setError(error.message || "打不开本地数据");
+        showAuth();
+        authError.textContent = error.message || "打不开账号数据";
       }
     }
 
@@ -430,26 +549,11 @@
       if (!confirm("删除 @" + handle + "？")) return;
       setError("");
       try {
-        if (browserMode) {
-          const stored = readStore();
-          const key = handle.toLowerCase();
-          const before = stored.accounts.length;
-          stored.accounts = stored.accounts.filter((item) => String(item.handle).toLowerCase() !== key);
-          if (stored.accounts.length === before) throw new Error("列表里没有这个账号");
-          stored.posts = stored.posts.filter((item) => String(item.handle).toLowerCase() !== key);
-          stored.errors = stored.errors.filter((item) => String(item.handle).toLowerCase() !== key);
-          stored.sources = stored.sources.filter((item) => String(item.handle).toLowerCase() !== key);
-          if (!stored.accounts.length) {
-            stored.posts = [];
-            stored.errors = [];
-            stored.sources = [];
-            stored.refreshedAt = null;
-          }
-          writeStore(stored);
-          render(localState());
-          return;
-        }
-        render(await api("/api/accounts/" + encodeURIComponent(handle), { method: "DELETE" }));
+        render(await api("/api/remove-account", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ handle }),
+        }));
       } catch (error) {
         setError(error.message);
       }
@@ -460,23 +564,11 @@
       if (busy) return;
       setError("");
       try {
-        if (browserMode) {
-          const handle = normalizeHandle(handleInput.value);
-          const stored = readStore();
-          if (stored.accounts.some((item) => String(item.handle).toLowerCase() === handle.toLowerCase())) {
-            throw new Error("这个账号已经在列表里");
-          }
-          if (stored.accounts.length >= 20) throw new Error("最多添加 20 个账号");
-          stored.accounts.push({ handle, addedAt: new Date().toISOString() });
-          writeStore(stored);
-          render(localState());
-        } else {
-          render(await api("/api/accounts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ handle: handleInput.value }),
-          }));
-        }
+        render(await api("/api/accounts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ handle: handleInput.value }),
+        }));
         handleInput.value = "";
         handleInput.focus();
       } catch (error) {
@@ -490,25 +582,7 @@
       setBusy(true);
       metaEl.textContent = "正在获取发言并翻译，请稍候。";
       try {
-        if (browserMode) {
-          const stored = readStore();
-          const remote = await api("/api/refresh", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ accounts: stored.accounts, bearerToken: stored.bearerToken || "" }),
-          });
-          const refreshed = new Set((remote.sources || []).map((item) => String(item.handle).toLowerCase()));
-          stored.posts = (stored.posts || []).filter((item) => !refreshed.has(String(item.handle).toLowerCase()));
-          stored.posts = stored.posts.concat(remote.posts || []);
-          stored.posts.sort((a, b) => String(b.time || "").localeCompare(String(a.time || "")));
-          stored.errors = remote.errors || [];
-          stored.sources = remote.sources || [];
-          stored.refreshedAt = remote.refreshedAt || null;
-          writeStore(stored);
-          render(localState(remote));
-        } else {
-          render(await api("/api/refresh", { method: "POST" }));
-        }
+        render(await api("/api/refresh", { method: "POST" }));
       } catch (error) {
         setError(error.message);
         await load();
@@ -541,21 +615,65 @@
     });
 
     async function saveToken(value) {
-      if (browserMode) {
-        const stored = readStore();
-        let token = String(value || "").trim();
-        if (token.toLowerCase().startsWith("bearer ")) token = token.slice(7).trim();
-        stored.bearerToken = token;
-        writeStore(stored);
-        render(localState());
-        return;
-      }
       render(await api("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ bearerToken: value }),
       }));
     }
+
+    async function submitAuth(path) {
+      authError.textContent = "";
+      setError("");
+      const email = document.querySelector("#email").value;
+      const password = document.querySelector("#password").value;
+      try {
+        const state = await api(path, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+        });
+        document.querySelector("#password").value = "";
+        resetFilters();
+        showApp(state);
+      } catch (error) {
+        authError.textContent = error.message;
+      }
+    }
+
+    document.querySelector("#auth-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitAuth("/api/login");
+    });
+
+    document.querySelector("#register-btn").addEventListener("click", () => {
+      submitAuth("/api/register");
+    });
+
+    document.querySelector("#logout").addEventListener("click", async () => {
+      if (busy) return;
+      setError("");
+      try {
+        await api("/api/logout", { method: "POST" });
+        document.querySelector("#password").value = "";
+        resetFilters();
+        showAuth();
+      } catch (error) {
+        setError(error.message);
+      }
+    });
+
+    accountFilterEl.addEventListener("change", () => {
+      accountFilter = accountFilterEl.value;
+      render(latest);
+    });
+
+    timeFilterEl.addEventListener("change", () => {
+      const days = Number(timeFilterEl.value);
+      if (!TIME_WINDOWS.includes(days)) return;
+      timeFilterDays = days;
+      render(latest);
+    });
 
     load();
   </script>

@@ -7,6 +7,30 @@
     "api/refresh.py": {
       "maxDuration": 60,
       "includeFiles": "server.py"
+    },
+    "api/register.py": {
+      "maxDuration": 10,
+      "includeFiles": "server.py"
+    },
+    "api/login.py": {
+      "maxDuration": 10,
+      "includeFiles": "server.py"
+    },
+    "api/logout.py": {
+      "maxDuration": 10,
+      "includeFiles": "server.py"
+    },
+    "api/accounts.py": {
+      "maxDuration": 10,
+      "includeFiles": "server.py"
+    },
+    "api/remove-account.py": {
+      "maxDuration": 10,
+      "includeFiles": "server.py"
+    },
+    "api/settings.py": {
+      "maxDuration": 10,
+      "includeFiles": "server.py"
     }
   }
 }

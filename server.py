@@ -15,6 +15,7 @@ import html
 import json
 import os
 import re
+import secrets
 import sys
 import threading
 import time
@@ -37,6 +38,13 @@ ACCOUNTS_PATH = DATA / "accounts.json"
 BRIEFING_PATH = DATA / "briefing.json"
 SETTINGS_PATH = DATA / "settings.json"
 CACHE_PATH = DATA / "translations.json"
+BLOB_API = "https://vercel.com/api/blob"
+COOKIE_NAME = "xb_session"
+SESSION_SECONDS = 30 * 24 * 60 * 60
+PBKDF2_ITERATIONS = 200_000
+STORE_PATH_RE = re.compile(r"^xbrief/(users|sessions)/[A-Za-z0-9_-]{16,200}\.json$")
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{20,200}$")
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -57,13 +65,32 @@ PROVIDER_LABELS = {
 
 data_lock = threading.Lock()
 refresh_lock = threading.Lock()
-refreshing = False
+refreshing_emails: set[str] = set()
+user_locks: dict[str, threading.Lock] = {}
 syndication_block_until = 0.0
 memory_translations: dict[str, dict] = {}
 
 
-def browser_persist() -> bool:
+def on_vercel() -> bool:
     return os.environ.get("VERCEL") == "1"
+
+
+def load_local_env() -> None:
+    path = ROOT / ".env.local"
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if not text or text.startswith("#") or "=" not in text:
+            continue
+        key, value = text.split("=", 1)
+        key = key.strip()
+        if not key or key == "VERCEL" or key in os.environ:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        os.environ[key] = value
 
 
 class AppError(Exception):
@@ -543,7 +570,7 @@ def cache_key(text: str) -> str:
 
 def translate_text(text: str) -> dict:
     key = cache_key(text)
-    if browser_persist():
+    if on_vercel():
         cached = memory_translations.get(key)
     else:
         with data_lock:
@@ -568,7 +595,7 @@ def translate_text(text: str) -> dict:
         except (FetchError, TranslationError) as second:
             raise TranslationError(f"{error}；MyMemory：{second}") from second
     result = {"translation": translated, "sourceLang": detected, "engine": engine}
-    if browser_persist():
+    if on_vercel():
         memory_translations[key] = result
         return result
     with data_lock:
@@ -596,135 +623,369 @@ def apply_translation(post: dict) -> dict:
     return item
 
 
-def state_payload(
-    accounts: list,
-    posts: list,
-    errors: list,
-    sources: list,
-    refreshed_at: str | None,
-    token: str,
-    active: bool,
-) -> dict:
+class AuthError(AppError):
+    pass
+
+
+def blob_credentials() -> tuple[str, str] | None:
+    token = os.environ.get("BLOB_READ_WRITE_TOKEN", "").strip()
+    if not token:
+        return None
+    parts = token.split("_")
+    if len(parts) < 5 or parts[0] != "vercel" or parts[1] != "blob" or parts[2] != "rw" or not parts[3]:
+        raise AppError("用户存储凭证无法识别")
+    return token, parts[3]
+
+
+def store_required() -> tuple[str, str] | None:
+    creds = blob_credentials()
+    if creds:
+        return creds
+    if on_vercel():
+        raise AppError("线上还没有可用的用户存储。请把私有 Blob 存储接到这个 Vercel 项目。")
+    return None
+
+
+def check_store_path(pathname: str) -> str:
+    if not STORE_PATH_RE.fullmatch(pathname):
+        raise AppError("存储路径不正确")
+    return pathname
+
+
+def store_read(pathname: str) -> dict | None:
+    pathname = check_store_path(pathname)
+    creds = store_required()
+    if creds:
+        return blob_read(pathname, creds)
+    path = DATA / pathname
+    data = read_json(path, {})
+    return data or None
+
+
+def store_write(pathname: str, payload: dict) -> None:
+    pathname = check_store_path(pathname)
+    creds = store_required()
+    if creds:
+        blob_write(pathname, payload, creds)
+        return
+    atomic_write(DATA / pathname, payload)
+
+
+def blob_read(pathname: str, creds: tuple[str, str]) -> dict | None:
+    token, store_id = creds
+    url = f"https://{store_id}.private.blob.vercel-storage.com/{pathname}?cache=0"
+    request = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {token}", "User-Agent": "x-briefing"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        print(f"blob read failed: HTTP {exc.code}", flush=True)
+        raise AppError("读取账号数据失败，请稍后再试") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        print(f"blob read failed: {exc}", flush=True)
+        raise AppError("读取账号数据失败，请稍后再试") from exc
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise AppError("账号数据损坏") from exc
+    if not isinstance(data, dict):
+        raise AppError("账号数据损坏")
+    return data
+
+
+def blob_write(pathname: str, payload: dict, creds: tuple[str, str]) -> None:
+    token, store_id = creds
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    query = urllib.parse.urlencode({"pathname": pathname})
+    request = urllib.request.Request(
+        f"{BLOB_API}/?{query}",
+        data=raw,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "x-api-version": "13",
+            "x-vercel-blob-store-id": store_id,
+            "x-vercel-blob-access": "private",
+            "x-content-type": "application/json",
+            "x-add-random-suffix": "0",
+            "x-allow-overwrite": "1",
+            "x-cache-control-max-age": "60",
+            "x-content-length": str(len(raw)),
+        },
+        method="PUT",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            response.read()
+    except urllib.error.HTTPError as exc:
+        print(f"blob write failed: HTTP {exc.code}", flush=True)
+        raise AppError("保存账号数据失败，请稍后再试") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        print(f"blob write failed: {exc}", flush=True)
+        raise AppError("保存账号数据失败，请稍后再试") from exc
+
+
+def user_path(email: str) -> str:
+    digest = hashlib.sha256(email.encode("utf-8")).hexdigest()
+    return f"xbrief/users/{digest}.json"
+
+
+def lock_for(email: str) -> threading.Lock:
+    with data_lock:
+        lock = user_locks.get(email)
+        if lock is None:
+            lock = threading.Lock()
+            user_locks[email] = lock
+        return lock
+
+
+def normalize_email(raw: object) -> str:
+    if not isinstance(raw, str):
+        raise AppError("请输入邮箱")
+    email = raw.strip().lower()
+    if len(email) > 254 or not EMAIL_RE.fullmatch(email):
+        raise AppError("邮箱格式不正确")
+    return email
+
+
+def normalize_password(raw: object) -> str:
+    if not isinstance(raw, str) or len(raw) < 8:
+        raise AppError("密码至少 8 位")
+    if len(raw) > 128:
+        raise AppError("密码太长")
+    return raw
+
+
+def password_digest(password: str, salt: bytes, iterations: int) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations).hex()
+
+
+def new_user(email: str, password: str) -> dict:
+    salt = secrets.token_bytes(16)
     return {
-        "accounts": accounts,
-        "posts": posts,
-        "errors": errors,
-        "sources": sources,
-        "refreshedAt": refreshed_at,
-        "bearerConfigured": bool(token),
-        "refreshing": active,
-        "providerLabels": PROVIDER_LABELS,
-        "persist": "browser" if browser_persist() else "file",
+        "email": email,
+        "passwordHash": password_digest(password, salt, PBKDF2_ITERATIONS),
+        "salt": salt.hex(),
+        "iterations": PBKDF2_ITERATIONS,
+        "createdAt": now_iso(),
+        "accounts": [],
+        "posts": [],
+        "errors": [],
+        "sources": [],
+        "refreshedAt": None,
+        "bearerToken": "",
     }
 
 
-def public_state() -> dict:
-    with data_lock:
-        accounts = load_accounts()
-        briefing = load_briefing()
-        token = load_token()
-        active = refreshing
-    return state_payload(
-        accounts,
-        briefing["posts"],
-        briefing["errors"],
-        briefing["sources"],
-        briefing["refreshedAt"],
-        token,
-        active,
-    )
+def password_matches(password: str, user: dict | None) -> bool:
+    salt = bytes.fromhex(user["salt"]) if user else bytes(16)
+    iterations = PBKDF2_ITERATIONS
+    if user:
+        try:
+            iterations = int(user.get("iterations") or PBKDF2_ITERATIONS)
+        except (TypeError, ValueError):
+            iterations = PBKDF2_ITERATIONS
+        iterations = min(max(iterations, 100_000), 400_000)
+    digest = password_digest(password, salt, iterations)
+    expected = user.get("passwordHash") if user else ""
+    if not isinstance(expected, str) or not expected:
+        expected = "0" * 64
+    return bool(user) and secrets.compare_digest(digest, expected)
 
 
-def request_accounts(payload: dict) -> list[dict] | None:
-    if "accounts" not in payload:
-        return None
-    raw = payload.get("accounts")
+def clean_accounts(raw: object) -> list[dict]:
     if not isinstance(raw, list):
-        raise AppError("账号列表格式不正确")
+        return []
     accounts = []
     seen: set[str] = set()
     for item in raw:
-        handle_raw = item.get("handle") if isinstance(item, dict) else item
-        added_at = item.get("addedAt") if isinstance(item, dict) and isinstance(item.get("addedAt"), str) else ""
-        handle = normalize_handle(handle_raw)
+        if not isinstance(item, dict) or not isinstance(item.get("handle"), str):
+            continue
+        try:
+            handle = normalize_handle(item["handle"])
+        except AppError:
+            continue
         if handle.lower() in seen:
             continue
         seen.add(handle.lower())
-        if len(accounts) >= MAX_ACCOUNTS:
-            raise AppError(f"最多添加 {MAX_ACCOUNTS} 个账号")
+        added_at = item.get("addedAt") if isinstance(item.get("addedAt"), str) else ""
         accounts.append({"handle": handle, "addedAt": added_at})
+        if len(accounts) >= MAX_ACCOUNTS:
+            break
     return accounts
 
 
-def request_token(payload: dict) -> str | None:
-    if "bearerToken" not in payload:
+def load_user(email: str) -> dict | None:
+    data = store_read(user_path(email))
+    if not data:
         return None
-    raw = payload.get("bearerToken")
-    if not isinstance(raw, str):
-        raise AppError("Bearer Token 必须是文本")
-    token = raw.strip()
-    if token.lower().startswith("bearer "):
-        token = token[7:].strip()
-    if len(token) > 400:
-        raise AppError("Bearer Token 太长")
+    if data.get("email") != email or not isinstance(data.get("passwordHash"), str) or not isinstance(data.get("salt"), str):
+        raise AppError("账号数据损坏")
+    data["accounts"] = clean_accounts(data.get("accounts"))
+    data["posts"] = data.get("posts") if isinstance(data.get("posts"), list) else []
+    data["errors"] = data.get("errors") if isinstance(data.get("errors"), list) else []
+    data["sources"] = data.get("sources") if isinstance(data.get("sources"), list) else []
+    token = data.get("bearerToken") or ""
+    data["bearerToken"] = token.strip() if isinstance(token, str) else ""
+    if not isinstance(data.get("refreshedAt"), str):
+        data["refreshedAt"] = None
+    return data
+
+
+def save_user(user: dict) -> None:
+    store_write(user_path(user["email"]), user)
+
+
+def user_state(user: dict, active: bool | None = None) -> dict:
+    if active is None:
+        active = user["email"] in refreshing_emails
+    return {
+        "authenticated": True,
+        "email": user["email"],
+        "accounts": user["accounts"],
+        "posts": user["posts"],
+        "errors": user["errors"],
+        "sources": user["sources"],
+        "refreshedAt": user["refreshedAt"],
+        "bearerConfigured": bool(user.get("bearerToken")),
+        "refreshing": active,
+        "providerLabels": PROVIDER_LABELS,
+        "persist": "account",
+    }
+
+
+def logged_out_state() -> dict:
+    return {"authenticated": False, "providerLabels": PROVIDER_LABELS}
+
+
+def read_session(token: str) -> str | None:
+    if not token or not SESSION_RE.fullmatch(token):
+        return None
+    data = store_read(f"xbrief/sessions/{token}.json")
+    if not data:
+        return None
+    expires = data.get("expiresAt")
+    email = data.get("email")
+    if not isinstance(expires, (int, float)) or expires < time.time() or not isinstance(email, str):
+        return None
+    return email
+
+
+def create_session(email: str) -> str:
+    token = secrets.token_urlsafe(32)
+    store_write(
+        f"xbrief/sessions/{token}.json",
+        {"email": email, "expiresAt": int(time.time()) + SESSION_SECONDS},
+    )
     return token
 
 
-def add_account(raw: object) -> dict:
-    handle = normalize_handle(raw)
-    with data_lock:
-        accounts = load_accounts()
-        if any(item["handle"].lower() == handle.lower() for item in accounts):
-            raise AppError("这个账号已经在列表里")
-        if len(accounts) >= MAX_ACCOUNTS:
-            raise AppError(f"最多添加 {MAX_ACCOUNTS} 个账号")
-        accounts.append({"handle": handle, "addedAt": now_iso()})
-        atomic_write(ACCOUNTS_PATH, {"accounts": accounts})
-    return public_state()
+def end_session(token: str) -> None:
+    if not token or not SESSION_RE.fullmatch(token):
+        return
+    path = f"xbrief/sessions/{token}.json"
+    data = store_read(path)
+    if not data:
+        return
+    data["expiresAt"] = 0
+    store_write(path, data)
 
 
-def delete_account(raw: object) -> dict:
-    handle = normalize_handle(raw)
-    with data_lock:
-        accounts = load_accounts()
-        kept = [item for item in accounts if item["handle"].lower() != handle.lower()]
-        if len(kept) == len(accounts):
-            raise AppError("列表里没有这个账号")
-        atomic_write(ACCOUNTS_PATH, {"accounts": kept})
-        briefing = load_briefing()
-        posts = [post for post in briefing["posts"] if str(post.get("handle", "")).lower() != handle.lower()]
-        errors = [item for item in briefing["errors"] if str(item.get("handle", "")).lower() != handle.lower()]
-        sources = [item for item in briefing["sources"] if str(item.get("handle", "")).lower() != handle.lower()]
-        if not kept:
-            posts, errors, sources = [], [], []
-        atomic_write(
-            BRIEFING_PATH,
-            {
-                "refreshedAt": briefing["refreshedAt"] if kept else None,
-                "posts": posts,
-                "errors": errors,
-                "sources": sources,
-            },
-        )
-    return public_state()
+def register_user(raw_email: object, raw_password: object) -> tuple[dict, str]:
+    email = normalize_email(raw_email)
+    password = normalize_password(raw_password)
+    with lock_for(email):
+        if load_user(email):
+            raise AppError("这个邮箱已经注册")
+        user = new_user(email, password)
+        save_user(user)
+    return user_state(user, active=False), create_session(email)
 
 
-def refresh_accounts(payload: dict | None = None) -> dict:
-    global refreshing
-    payload = payload or {}
-    if not refresh_lock.acquire(blocking=False):
-        raise AppError("正在刷新，请稍候")
+def login_user(raw_email: object, raw_password: object) -> tuple[dict, str]:
     try:
-        refreshing = True
-        supplied = request_accounts(payload)
-        supplied_token = request_token(payload)
-        ephemeral = supplied is not None
-        with data_lock:
-            accounts = supplied if supplied is not None else load_accounts()
-            token = supplied_token if supplied_token is not None else load_token()
-            previous_briefing = {"posts": [], "errors": [], "sources": []} if ephemeral else load_briefing()
-        previous = previous_briefing["posts"]
-        previous_sources = previous_briefing["sources"]
+        email = normalize_email(raw_email)
+    except AppError:
+        raise AppError("邮箱或密码不正确") from None
+    if not isinstance(raw_password, str) or not raw_password:
+        raise AppError("邮箱或密码不正确")
+    user = load_user(email)
+    if not password_matches(raw_password, user) or user is None:
+        raise AppError("邮箱或密码不正确")
+    return user_state(user, active=False), create_session(email)
+
+
+def require_user(email: str | None) -> dict:
+    if not email:
+        raise AuthError("请先登录")
+    user = load_user(email)
+    if not user:
+        raise AuthError("请先登录")
+    return user
+
+
+def add_account(user: dict, raw: object) -> dict:
+    handle = normalize_handle(raw)
+    email = user["email"]
+    with lock_for(email):
+        current = load_user(email) or user
+        if any(item["handle"].lower() == handle.lower() for item in current["accounts"]):
+            raise AppError("这个账号已经在列表里")
+        if len(current["accounts"]) >= MAX_ACCOUNTS:
+            raise AppError(f"最多添加 {MAX_ACCOUNTS} 个账号")
+        current["accounts"].append({"handle": handle, "addedAt": now_iso()})
+        save_user(current)
+    return user_state(current)
+
+
+def delete_account(user: dict, raw: object) -> dict:
+    handle = normalize_handle(raw)
+    email = user["email"]
+    with lock_for(email):
+        current = load_user(email) or user
+        kept = [item for item in current["accounts"] if item["handle"].lower() != handle.lower()]
+        if len(kept) == len(current["accounts"]):
+            raise AppError("列表里没有这个账号")
+        current["accounts"] = kept
+        current["posts"] = [post for post in current["posts"] if str(post.get("handle", "")).lower() != handle.lower()]
+        current["errors"] = [item for item in current["errors"] if str(item.get("handle", "")).lower() != handle.lower()]
+        current["sources"] = [item for item in current["sources"] if str(item.get("handle", "")).lower() != handle.lower()]
+        if not kept:
+            current["posts"] = []
+            current["errors"] = []
+            current["sources"] = []
+            current["refreshedAt"] = None
+        save_user(current)
+    return user_state(current)
+
+
+def begin_refresh(email: str) -> None:
+    with refresh_lock:
+        if email in refreshing_emails:
+            raise AppError("正在刷新，请稍候")
+        refreshing_emails.add(email)
+
+
+def end_refresh(email: str) -> None:
+    with refresh_lock:
+        refreshing_emails.discard(email)
+
+
+def refresh_accounts(user: dict) -> dict:
+    email = user["email"]
+    begin_refresh(email)
+    try:
+        with lock_for(email):
+            current = load_user(email) or user
+            accounts = list(current["accounts"])
+            token = current.get("bearerToken") or ""
+            previous = list(current["posts"])
+            previous_sources = list(current["sources"])
         if not accounts:
             raise AppError("还没有账号。请先添加一个 X 账号")
         posts = list(previous)
@@ -753,30 +1014,24 @@ def refresh_accounts(payload: dict | None = None) -> dict:
             if not translated_posts:
                 errors.append({"handle": handle, "message": "没有读到公开帖子"})
             print(f"refresh @{handle}: {len(translated_posts)} posts via {provider}", flush=True)
-        if ephemeral:
-            current = {item["handle"].lower() for item in accounts}
-        else:
-            with data_lock:
-                current = {item["handle"].lower() for item in load_accounts()}
-        posts = [post for post in posts if str(post.get("handle", "")).lower() in current]
-        errors = [item for item in errors if str(item.get("handle", "")).lower() in current]
-        sources = [item for item in sources if str(item.get("handle", "")).lower() in current]
-        posts.sort(key=lambda post: post.get("time") or "", reverse=True)
-        refreshed_at = now_iso()
-        if ephemeral:
-            return state_payload(accounts, posts, errors, sources, refreshed_at, token, False)
-        with data_lock:
-            atomic_write(
-                BRIEFING_PATH,
-                {"refreshedAt": refreshed_at, "posts": posts, "errors": errors, "sources": sources},
-            )
-        return public_state()
+        with lock_for(email):
+            current = load_user(email) or user
+            allowed = {item["handle"].lower() for item in current["accounts"]}
+            posts = [post for post in posts if str(post.get("handle", "")).lower() in allowed]
+            errors = [item for item in errors if str(item.get("handle", "")).lower() in allowed]
+            sources = [item for item in sources if str(item.get("handle", "")).lower() in allowed]
+            posts.sort(key=lambda post: post.get("time") or "", reverse=True)
+            current["posts"] = posts
+            current["errors"] = errors
+            current["sources"] = sources
+            current["refreshedAt"] = now_iso()
+            save_user(current)
+        return user_state(current, active=False)
     finally:
-        refreshing = False
-        refresh_lock.release()
+        end_refresh(email)
 
 
-def update_settings(payload: dict) -> dict:
+def update_settings(user: dict, payload: dict) -> dict:
     if "bearerToken" not in payload:
         raise AppError("缺少 bearerToken")
     raw = payload.get("bearerToken")
@@ -789,9 +1044,12 @@ def update_settings(payload: dict) -> dict:
         token = token[7:].strip()
     if token and len(token) > 400:
         raise AppError("Bearer Token 太长")
-    with data_lock:
-        save_token(token)
-    return public_state()
+    email = user["email"]
+    with lock_for(email):
+        current = load_user(email) or user
+        current["bearerToken"] = token
+        save_user(current)
+    return user_state(current)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -807,6 +1065,18 @@ class Handler(BaseHTTPRequestHandler):
         forwarded = self.headers.get("x-forwarded-uri") or self.headers.get("x-invoke-path") or self.path
         return urllib.parse.urlparse(forwarded).path
 
+    def cookie(self, name: str) -> str:
+        raw = self.headers.get("Cookie") or ""
+        prefix = name + "="
+        for part in raw.split(";"):
+            piece = part.strip()
+            if piece.startswith(prefix):
+                return piece[len(prefix) :]
+        return ""
+
+    def session_email(self) -> str | None:
+        return read_session(self.cookie(COOKIE_NAME))
+
     def do_GET(self) -> None:
         path = self.route_path()
         if path in ("/", "/index.html"):
@@ -816,22 +1086,63 @@ class Handler(BaseHTTPRequestHandler):
             self.send_bytes(204, b"", "image/x-icon")
             return
         if path == "/api/state":
-            self.send_json(200, public_state())
+            try:
+                email = self.session_email()
+                if not email:
+                    self.send_json(200, logged_out_state(), clear_session=bool(self.cookie(COOKIE_NAME)))
+                    return
+                user = load_user(email)
+                if not user:
+                    self.send_json(200, logged_out_state(), clear_session=True)
+                    return
+                self.send_json(200, user_state(user))
+            except AppError as exc:
+                self.send_json(500, {"error": str(exc)})
             return
         self.send_json(404, {"error": "没有这个地址"})
 
     def do_POST(self) -> None:
         path = self.route_path()
         try:
+            email = self.session_email()
+            body: dict | None = None
+
+            def payload() -> dict:
+                nonlocal body
+                if body is None:
+                    body = self.read_body()
+                return body
+
+            if path == "/api/register":
+                state, token = register_user(payload().get("email"), payload().get("password"))
+                self.send_json(200, state, session_token=token)
+                return
+            if path == "/api/login":
+                state, token = login_user(payload().get("email"), payload().get("password"))
+                self.send_json(200, state, session_token=token)
+                return
+            if path == "/api/logout":
+                end_session(self.cookie(COOKIE_NAME))
+                self.send_json(200, logged_out_state(), clear_session=True)
+                return
             if path == "/api/accounts":
-                self.send_json(200, add_account(self.read_body().get("handle")))
+                self.send_json(200, add_account(require_user(email), payload().get("handle")))
+                return
+            if path == "/api/remove-account":
+                self.send_json(200, delete_account(require_user(email), payload().get("handle")))
                 return
             if path == "/api/refresh":
-                self.send_json(200, refresh_accounts(self.read_body()))
+                self.send_json(200, refresh_accounts(require_user(email)))
                 return
+        except AuthError as exc:
+            self.send_json(401, {"error": str(exc)})
+            return
         except AppError as exc:
-            status = 409 if "已经" in str(exc) or "正在刷新" in str(exc) else 400
-            self.send_json(status, {"error": str(exc)})
+            message = str(exc)
+            status = 409 if "已经" in message or "正在刷新" in message else 400
+            if message == "邮箱或密码不正确":
+                status = 401
+            self.send_json(status, {"error": message})
             return
         self.send_json(404, {"error": "没有这个地址"})
 
@@ -843,7 +1154,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             handle = urllib.parse.unquote(path[len(prefix) :])
-            self.send_json(200, delete_account(handle))
+            self.send_json(200, delete_account(require_user(self.session_email()), handle))
+        except AuthError as exc:
+            self.send_json(401, {"error": str(exc)})
         except AppError as exc:
             status = 404 if "没有这个账号" in str(exc) else 400
             self.send_json(status, {"error": str(exc)})
@@ -854,7 +1167,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": "没有这个地址"})
             return
         try:
-            self.send_json(200, update_settings(self.read_body()))
+            self.send_json(200, update_settings(require_user(self.session_email()), self.read_body()))
+        except AuthError as exc:
+            self.send_json(401, {"error": str(exc)})
         except AppError as exc:
             self.send_json(400, {"error": str(exc)})
 
@@ -879,14 +1194,32 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_bytes(200, path.read_bytes(), content_type)
 
-    def send_json(self, status: int, payload: dict) -> None:
-        self.send_bytes(status, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+    def send_json(
+        self,
+        status: int,
+        payload: dict,
+        session_token: str | None = None,
+        clear_session: bool = False,
+    ) -> None:
+        extra = []
+        if session_token:
+            extra.append(("Set-Cookie", session_cookie(session_token)))
+        elif clear_session:
+            extra.append(("Set-Cookie", session_cookie("", clear=True)))
+        self.send_bytes(
+            status,
+            json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            "application/json; charset=utf-8",
+            extra,
+        )
 
-    def send_bytes(self, status: int, body: bytes, content_type: str) -> None:
+    def send_bytes(self, status: int, body: bytes, content_type: str, extra: list[tuple[str, str]] | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for key, value in extra or []:
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -939,6 +1272,31 @@ def self_check() -> None:
     )
     assert fx_posts[0]["url"] == "https://x.com/example/status/7"
     assert fx_posts[0]["text"] == "A public post"
+    assert normalize_email("  A@B.Co ") == "a@b.co"
+    try:
+        normalize_email("not-an-email")
+    except AppError:
+        pass
+    else:
+        raise AssertionError("invalid email was accepted")
+    sample = new_user("a@b.co", "password1")
+    assert password_matches("password1", sample)
+    assert not password_matches("password2", sample)
+    assert "passwordHash" not in user_state(sample)
+    assert logged_out_state()["authenticated"] is False
+    if not os.environ.get("BLOB_READ_WRITE_TOKEN"):
+        email = "self-check@example.com"
+        user = new_user(email, "password1")
+        user["accounts"] = [{"handle": "nasa", "addedAt": "2026-01-01T00:00:00+00:00"}]
+        save_user(user)
+        loaded = load_user(email)
+        assert loaded is not None and loaded["accounts"][0]["handle"] == "nasa"
+        token = create_session(email)
+        assert read_session(token) == email
+        end_session(token)
+        assert read_session(token) is None
+        (DATA / user_path(email)).unlink()
+        (DATA / f"xbrief/sessions/{token}.json").unlink()
     print("self-check ok")
 
 
@@ -978,10 +1336,24 @@ def posts_from_fx(data: dict, handle: str) -> list[dict]:
     return posts
 
 
+def session_cookie(token: str, clear: bool = False) -> str:
+    parts = [
+        f"{COOKIE_NAME}={'' if clear else token}",
+        "HttpOnly",
+        "SameSite=Lax",
+        "Path=/",
+        f"Max-Age={'0' if clear else SESSION_SECONDS}",
+    ]
+    if on_vercel():
+        parts.append("Secure")
+    return "; ".join(parts)
+
+
 def main() -> None:
     if "--self-check" in sys.argv:
         self_check()
         return
+    load_local_env()
     DATA.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True
