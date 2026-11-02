@@ -256,6 +256,7 @@ def fetch_syndication(handle: str) -> list[dict]:
     status, headers, body = http_request(
         url,
         headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"},
+        timeout=12,
     )
     text = body.decode("utf-8", "replace")
     remaining = header_get(headers, "x-rate-limit-remaining")
@@ -322,6 +323,9 @@ def fxembed_page(handle: str, status: int, body: bytes) -> tuple[list[dict], str
         raise FetchError("FxEmbed 返回了无法识别的结果")
     code = data.get("code", status)
     if status == 404 or code == 404:
+        # An empty results list is a transient timeline miss, not a missing account.
+        if isinstance(data.get("results"), list):
+            raise FetchError("FxEmbed 时间线暂时没有返回")
         raise FetchError(f"找不到账号 @{handle}")
     if status != 200 or code not in (200, None):
         message = short_text(data.get("message") or f"HTTP {status}")
@@ -379,7 +383,11 @@ def fetch_fxembed(handle: str) -> list[dict]:
             f"{urllib.parse.quote(handle)}/statuses?{urllib.parse.urlencode(query)}"
         )
         try:
-            status, _headers, body = http_request(url, headers={"User-Agent": UA, "Accept": "application/json"})
+            status, _headers, body = http_request(
+                url,
+                headers={"User-Agent": UA, "Accept": "application/json"},
+                timeout=10,
+            )
             page_posts, nxt = fxembed_page(handle, status, body)
         except FetchError:
             if posts:
@@ -515,49 +523,67 @@ def count_recent(posts: list, days: int) -> int:
     return total
 
 
+def fxembed_retryable(exc: FetchError) -> bool:
+    return "找不到账号" not in str(exc)
+
+
 def fetch_account(handle: str, token: str) -> tuple[list[dict], str]:
     failures: list[str] = []
     groups: list[tuple[list[dict], str]] = []
     if token:
         try:
             official = fetch_official(handle, token)
+            if count_recent(official, 7) >= 2:
+                return official[:POSTS_PER_ACCOUNT], "x-api"
             if official:
                 groups.append((official, "x-api"))
         except FetchError as exc:
             failures.append(f"官方 API：{exc}")
-    if syndication_ready():
-        try:
-            syndicated = fetch_syndication(handle)
-            if syndicated:
-                groups.append((syndicated, "syndication"))
-            else:
-                failures.append("公开嵌入时间线没有帖子")
-        except RateLimitError as exc:
-            failures.append(str(exc))
-        except FetchError as exc:
-            failures.append(f"公开嵌入时间线：{exc}")
-    else:
-        failures.append("公开嵌入时间线仍在限流，已跳过")
     embedded: list[dict] = []
-    for _attempt in range(3):
+    for attempt in range(5):
         try:
             embedded = fetch_fxembed(handle)
         except FetchError as exc:
             failures.append(f"FxEmbed：{exc}")
             embedded = []
+            if not fxembed_retryable(exc):
+                break
         if count_recent(embedded, 7) >= 2 or len(embedded) >= 8:
             break
+        if attempt < 4:
+            time.sleep(0.4 * (attempt + 1))
     if embedded:
         groups.append((embedded, "fxembed"))
+    # The embed timeline is a highlights feed for busy accounts. Use it only
+    # when the chronological timeline did not return recent posts.
+    if count_recent(embedded, 7) < 2:
+        if syndication_ready():
+            try:
+                syndicated = fetch_syndication(handle)
+                if syndicated:
+                    groups.append((syndicated, "syndication"))
+                else:
+                    failures.append("公开嵌入时间线没有帖子")
+            except RateLimitError as exc:
+                failures.append(str(exc))
+            except FetchError as exc:
+                failures.append(f"公开嵌入时间线：{exc}")
+        else:
+            failures.append("公开嵌入时间线仍在限流，已跳过")
     if groups:
         posts, provider = merge_recent(groups)
+        recent = count_recent(posts, 7)
         print(
             f"fetch @{handle}: "
             + ", ".join(f"{name} {len(batch)}/{count_recent(batch, 7)} in 7d" for batch, name in groups)
             + (f" failures={'; '.join(failures)}" if failures else "")
-            + f" kept {len(posts)}/{count_recent(posts, 7)} in 7d via {provider}",
+            + f" kept {len(posts)}/{recent} in 7d via {provider}",
             flush=True,
         )
+        if posts and (recent >= 2 or provider == "fxembed"):
+            return posts, provider
+        if failures and recent < 2:
+            raise FetchError(best_failure(failures))
         if posts:
             return posts, provider
     detail = best_failure(failures) if failures else "没有可用的读取方式"
@@ -1386,6 +1412,18 @@ def self_check() -> None:
     assert all(str(post["id"]).startswith("new") for post in merged)
     assert provider == "fxembed"
     assert merged[0]["time"] >= merged[-1]["time"]
+    try:
+        fxembed_page("elonmusk", 404, b'{"code":404,"results":[],"cursor":{"top":null,"bottom":null}}')
+    except FetchError as exc:
+        assert "找不到账号" not in str(exc)
+    else:
+        raise AssertionError("empty timeline 404 should fail")
+    try:
+        fxembed_page("missing", 404, b'{"code":404,"message":"NOT_FOUND"}')
+    except FetchError as exc:
+        assert "找不到账号" in str(exc)
+    else:
+        raise AssertionError("missing account should fail")
     if not os.environ.get("BLOB_READ_WRITE_TOKEN"):
         email = "self-check@example.com"
         user = new_user(email, "password1")
