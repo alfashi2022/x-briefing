@@ -30,6 +30,7 @@ from pathlib import Path
 HOST = "127.0.0.1"
 PORT = 8787
 POSTS_PER_ACCOUNT = 30
+RECENT_DAYS = 7
 MAX_ACCOUNTS = 20
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -311,7 +312,7 @@ def fetch_syndication(handle: str) -> list[dict]:
             break
     if remaining == "0":
         note_syndication_limit(reset_at)
-    return posts
+    return within_recent(posts)
 
 
 def fxembed_page(handle: str, status: int, body: bytes) -> tuple[list[dict], str]:
@@ -373,7 +374,7 @@ def fetch_fxembed(handle: str) -> list[dict]:
     cursor = ""
     seen_cursors: set[str] = set()
     for _page in range(2):
-        if len(posts) >= POSTS_PER_ACCOUNT:
+        if len(within_recent(posts)) >= POSTS_PER_ACCOUNT:
             break
         query = {"count": str(max(POSTS_PER_ACCOUNT, 20))}
         if cursor:
@@ -394,10 +395,13 @@ def fetch_fxembed(handle: str) -> list[dict]:
                 break
             raise
         posts.extend(page_posts)
-        if not nxt or nxt in seen_cursors or not page_posts:
+        # The next cursor is older. A page that already left the 7-day window
+        # means there is nothing newer left to fetch.
+        if page_crossed_window(page_posts) or not nxt or nxt in seen_cursors or not page_posts:
             break
         seen_cursors.add(nxt)
         cursor = nxt
+    posts = within_recent(posts)
     posts.sort(key=lambda post: post.get("time") or "", reverse=True)
     return posts[:POSTS_PER_ACCOUNT]
 
@@ -437,9 +441,16 @@ def fetch_official(handle: str, token: str) -> list[dict]:
     name = str(user.get("name") or "")
     if not user_id:
         raise FetchError("官方 API 没有返回用户 id")
+    start = datetime.fromtimestamp(recent_cutoff(), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    tw_query = urllib.parse.urlencode(
+        {
+            "max_results": str(POSTS_PER_ACCOUNT),
+            "tweet.fields": "created_at,lang,text",
+            "start_time": start,
+        }
+    )
     tw_status, _tw_headers, tw_body = http_request(
-        "https://api.x.com/2/users/"
-        f"{urllib.parse.quote(user_id)}/tweets?max_results={POSTS_PER_ACCOUNT}&tweet.fields=created_at,lang,text",
+        f"https://api.x.com/2/users/{urllib.parse.quote(user_id)}/tweets?{tw_query}",
         headers=headers,
     )
     try:
@@ -472,7 +483,7 @@ def fetch_official(handle: str, token: str) -> list[dict]:
         )
         if len(posts) >= POSTS_PER_ACCOUNT:
             break
-    return posts
+    return within_recent(posts)
 
 
 def best_failure(failures: list[str]) -> str:
@@ -507,20 +518,41 @@ def merge_recent(groups: list[tuple[list[dict], str]]) -> tuple[list[dict], str]
     return merged, label
 
 
-def count_recent(posts: list, days: int) -> int:
-    cutoff = time.time() - days * 24 * 60 * 60
-    total = 0
+def recent_cutoff(days: int = RECENT_DAYS) -> float:
+    return time.time() - days * 24 * 60 * 60
+
+
+def post_timestamp(post: dict) -> float | None:
+    raw = post.get("time") if isinstance(post, dict) else None
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw).timestamp()
+    except ValueError:
+        return None
+
+
+def within_recent(posts: list, days: int = RECENT_DAYS) -> list[dict]:
+    cutoff = recent_cutoff(days)
+    kept = []
     for post in posts:
-        raw = post.get("time") if isinstance(post, dict) else None
-        if not isinstance(raw, str) or not raw:
-            continue
-        try:
-            when = datetime.fromisoformat(raw).timestamp()
-        except ValueError:
-            continue
-        if when >= cutoff:
-            total += 1
-    return total
+        when = post_timestamp(post)
+        if when is not None and when >= cutoff:
+            kept.append(post)
+    return kept
+
+
+def page_crossed_window(posts: list, days: int = RECENT_DAYS) -> bool:
+    cutoff = recent_cutoff(days)
+    for post in posts:
+        when = post_timestamp(post)
+        if when is not None and when < cutoff:
+            return True
+    return False
+
+
+def count_recent(posts: list, days: int) -> int:
+    return len(within_recent(posts, days))
 
 
 def fxembed_retryable(exc: FetchError) -> bool:
@@ -533,30 +565,31 @@ def fetch_account(handle: str, token: str) -> tuple[list[dict], str]:
     if token:
         try:
             official = fetch_official(handle, token)
-            if count_recent(official, 7) >= 2:
+            if len(official) >= 2:
                 return official[:POSTS_PER_ACCOUNT], "x-api"
             if official:
                 groups.append((official, "x-api"))
         except FetchError as exc:
             failures.append(f"官方 API：{exc}")
     embedded: list[dict] = []
+    chronological = False
     for attempt in range(5):
         try:
             embedded = fetch_fxembed(handle)
+            chronological = True
+            break
         except FetchError as exc:
             failures.append(f"FxEmbed：{exc}")
             embedded = []
             if not fxembed_retryable(exc):
                 break
-        if count_recent(embedded, 7) >= 2 or len(embedded) >= 8:
-            break
         if attempt < 4:
             time.sleep(0.4 * (attempt + 1))
     if embedded:
         groups.append((embedded, "fxembed"))
-    # The embed timeline is a highlights feed for busy accounts. Use it only
-    # when the chronological timeline did not return recent posts.
-    if count_recent(embedded, 7) < 2:
+    # Highlights are not a 7-day timeline. Use them only when the chronological
+    # read failed, then keep whatever from that feed is still inside 7 days.
+    if not chronological:
         if syndication_ready():
             try:
                 syndicated = fetch_syndication(handle)
@@ -572,20 +605,23 @@ def fetch_account(handle: str, token: str) -> tuple[list[dict], str]:
             failures.append("公开嵌入时间线仍在限流，已跳过")
     if groups:
         posts, provider = merge_recent(groups)
-        recent = count_recent(posts, 7)
+        posts = within_recent(posts)
         print(
             f"fetch @{handle}: "
-            + ", ".join(f"{name} {len(batch)}/{count_recent(batch, 7)} in 7d" for batch, name in groups)
+            + ", ".join(f"{name} {len(batch)}/{count_recent(batch, RECENT_DAYS)} in 7d" for batch, name in groups)
             + (f" failures={'; '.join(failures)}" if failures else "")
-            + f" kept {len(posts)}/{recent} in 7d via {provider}",
+            + f" kept {len(posts)}/{len(posts)} in 7d via {provider}",
             flush=True,
         )
-        if posts and (recent >= 2 or provider == "fxembed"):
-            return posts, provider
-        if failures and recent < 2:
-            raise FetchError(best_failure(failures))
         if posts:
             return posts, provider
+        if chronological:
+            return [], provider or "fxembed"
+        if failures:
+            raise FetchError(best_failure(failures))
+        return [], provider or "fxembed"
+    if chronological:
+        return [], "fxembed"
     detail = best_failure(failures) if failures else "没有可用的读取方式"
     raise FetchError(detail)
 
@@ -1424,6 +1460,15 @@ def self_check() -> None:
         assert "找不到账号" in str(exc)
     else:
         raise AssertionError("missing account should fail")
+    fresh = datetime.now(timezone.utc).isoformat()
+    window = [
+        {"id": "old", "time": "2020-01-01T00:00:00+00:00"},
+        {"id": "new", "time": fresh},
+        {"id": "blank", "time": ""},
+    ]
+    assert [post["id"] for post in within_recent(window)] == ["new"]
+    assert page_crossed_window(window)
+    assert not page_crossed_window([{"time": fresh}])
     if not os.environ.get("BLOB_READ_WRITE_TOKEN"):
         email = "self-check@example.com"
         user = new_user(email, "password1")

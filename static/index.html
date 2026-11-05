@@ -101,6 +101,11 @@
       border-radius: 10px;
       padding: 8px 10px;
     }
+    .filters .range {
+      align-self: center;
+      color: var(--muted);
+      font-size: 14px;
+    }
     .session-bar {
       display: flex;
       justify-content: flex-end;
@@ -173,7 +178,7 @@
     <header>
       <p class="kicker">手动刷新</p>
       <h1>X 简报</h1>
-      <p class="lede">登录后添加要跟踪的账号。点击「刷新」后，每条发言并排显示原文和简体中文。</p>
+      <p class="lede">登录后添加要跟踪的账号。点击「刷新」后，显示最近 7 天的发言，原文和简体中文并排。</p>
     </header>
 
     <div id="session-bar" class="session-bar" hidden>
@@ -215,15 +220,7 @@
             <option value="">全部账号</option>
           </select>
         </label>
-        <label>时间
-          <select id="time-filter">
-            <option value="7">近 7 天</option>
-            <option value="30" selected>近 30 天</option>
-            <option value="90">近 90 天</option>
-            <option value="180">近 180 天</option>
-            <option value="360">近 360 天</option>
-          </select>
-        </label>
+        <span class="range">近 7 天</span>
       </div>
     </section>
 
@@ -268,15 +265,13 @@
     const handleInput = document.querySelector("#handle");
     const filtersEl = document.querySelector("#filters");
     const accountFilterEl = document.querySelector("#account-filter");
-    const timeFilterEl = document.querySelector("#time-filter");
-    const TIME_WINDOWS = [7, 30, 90, 180, 360];
+    const WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
     const authEl = document.querySelector("#auth");
     const appEl = document.querySelector("#app");
     const sessionBar = document.querySelector("#session-bar");
     const sessionEmail = document.querySelector("#session-email");
     const authError = document.querySelector("#auth-error");
     let accountFilter = "";
-    let timeFilterDays = 30;
     let busy = false;
     let latest = { accounts: [] };
 
@@ -324,7 +319,7 @@
     }
 
     function filteredPosts(state) {
-      const cutoff = Date.now() - timeFilterDays * 24 * 60 * 60 * 1000;
+      const cutoff = Date.now() - WINDOW_MS;
       return (state.posts || []).filter((post) => {
         if (accountFilter && String(post.handle).toLowerCase() !== accountFilter.toLowerCase()) return false;
         const time = postTime(post);
@@ -337,7 +332,6 @@
       if (accountFilter && !handles.some((handle) => handle.toLowerCase() === accountFilter.toLowerCase())) {
         accountFilter = "";
       }
-      if (!TIME_WINDOWS.includes(timeFilterDays)) timeFilterDays = 30;
       accountFilterEl.replaceChildren();
       const all = document.createElement("option");
       all.value = "";
@@ -350,7 +344,6 @@
         accountFilterEl.append(option);
       }
       accountFilterEl.value = accountFilter;
-      timeFilterEl.value = String(timeFilterDays);
       filtersEl.hidden = handles.length === 0;
     }
 
@@ -373,9 +366,8 @@
       const visible = filteredPosts(state);
       const bits = [];
       if (state.refreshedAt) bits.push("上次刷新 " + formatTime(state.refreshedAt));
-      if ((state.posts || []).length) {
-        bits.push("显示 " + visible.length + " 条");
-        bits.push("共 " + state.posts.length + " 条");
+      if ((state.posts || []).length || visible.length) {
+        bits.push("近 7 天 " + visible.length + " 条");
       }
       const providers = [...new Set((state.sources || []).map((item) => {
         return (state.providerLabels || {})[item.provider] || item.provider;
@@ -412,8 +404,8 @@
         emptyTitle.textContent = "还没有发言";
         emptyCopy.textContent = "已添加 " + state.accounts.length + " 个账号。点击「刷新」获取发言。";
       } else if (!visible.length) {
-        emptyTitle.textContent = "没有符合条件的发言";
-        emptyCopy.textContent = "账号和时间筛选只隐藏已加载的发言，不会删除账号。";
+        emptyTitle.textContent = "近 7 天没有发言";
+        emptyCopy.textContent = "刷新只获取最近 7 天。账号筛选只隐藏已加载的发言，不会删除账号。";
       }
       tokenState.textContent = state.bearerConfigured ? "Bearer Token：已保存在你的账号里" : "Bearer Token：未设置";
       latest = state;
@@ -527,7 +519,6 @@
 
     function resetFilters() {
       accountFilter = "";
-      timeFilterDays = 30;
     }
 
     async function load() {
@@ -665,13 +656,6 @@
 
     accountFilterEl.addEventListener("change", () => {
       accountFilter = accountFilterEl.value;
-      render(latest);
-    });
-
-    timeFilterEl.addEventListener("change", () => {
-      const days = Number(timeFilterEl.value);
-      if (!TIME_WINDOWS.includes(days)) return;
-      timeFilterDays = days;
       render(latest);
     });
 
